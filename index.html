@@ -925,6 +925,9 @@
                         <button class="btn btn-danger" onclick="clearAllData()">
                             <i class="fas fa-trash"></i> Limpar Todos os Dados
                         </button>
+                        <button class="btn btn-warning" onclick="forceDailyReset()">
+                            <i class="fas fa-redo"></i> Forçar Reset Diário
+                        </button>
                     </div>
                     
                     <div style="margin-top: 30px;">
@@ -1133,12 +1136,56 @@
                     const compressed = localStorage.getItem('habits_compressed');
                     if (compressed) {
                         const decompressed = LZString.decompressFromUTF16(compressed);
-                        return JSON.parse(decompressed) || [];
+                        const data = JSON.parse(decompressed) || [];
+                        
+                        // Migrar dados antigos para nova estrutura se necessário
+                        return data.map(habit => {
+                            // Se já estiver na nova estrutura, retorna como está
+                            if (habit.daily !== undefined) return habit;
+                            
+                            // Migrar de estrutura antiga para nova
+                            const today = this.getTodayDate();
+                            return {
+                                ...habit,
+                                daily: {
+                                    completed: false,
+                                    lastCheckDate: today
+                                },
+                                accumulated: {
+                                    streak: habit.streak || 0,
+                                    bestStreak: habit.bestStreak || 0,
+                                    totalCompletions: habit.totalCompletions || 
+                                        (habit.completions ? Object.keys(habit.completions).length : 0),
+                                    history: habit.completions || {}
+                                },
+                                completions: undefined // Remover campo antigo
+                            };
+                        });
                     }
                     
                     // Fallback para dados não comprimidos
                     const data = localStorage.getItem('habits');
-                    return data ? JSON.parse(data) : [];
+                    if (!data) return [];
+                    
+                    const parsedData = JSON.parse(data);
+                    const today = this.getTodayDate();
+                    
+                    // Converter estrutura antiga para nova
+                    return parsedData.map(habit => ({
+                        ...habit,
+                        daily: {
+                            completed: false,
+                            lastCheckDate: today
+                        },
+                        accumulated: {
+                            streak: habit.streak || 0,
+                            bestStreak: habit.bestStreak || 0,
+                            totalCompletions: habit.totalCompletions || 
+                                (habit.completions ? Object.keys(habit.completions).length : 0),
+                            history: habit.completions || {}
+                        },
+                        completions: undefined // Remover campo antigo
+                    }));
                 } catch (error) {
                     console.error('Erro ao carregar hábitos:', error);
                     
@@ -1310,6 +1357,8 @@
                     selectedDays.push(parseInt(checkbox.value));
                 });
                 
+                const today = this.getTodayDate();
+                
                 const habitData = {
                     id: this.editingHabitId ? this.editingHabitId : Date.now().toString(),
                     name: document.getElementById('habit-name').value.trim(),
@@ -1322,12 +1371,18 @@
                     createdAt: this.editingHabitId ? 
                         this.habits.find(h => h.id === this.editingHabitId).createdAt : 
                         new Date().toISOString(),
-                    streak: this.editingHabitId ? 
-                        this.habits.find(h => h.id === this.editingHabitId).streak : 0,
-                    bestStreak: this.editingHabitId ? 
-                        this.habits.find(h => h.id === this.editingHabitId).bestStreak : 0,
-                    completions: this.editingHabitId ? 
-                        this.habits.find(h => h.id === this.editingHabitId).completions : {},
+                    daily: this.editingHabitId ? 
+                        this.habits.find(h => h.id === this.editingHabitId).daily : {
+                            completed: false,
+                            lastCheckDate: today
+                        },
+                    accumulated: this.editingHabitId ? 
+                        this.habits.find(h => h.id === this.editingHabitId).accumulated : {
+                            streak: 0,
+                            bestStreak: 0,
+                            totalCompletions: 0,
+                            history: {}
+                        },
                     missedDays: this.editingHabitId ? 
                         this.habits.find(h => h.id === this.editingHabitId).missedDays || [] : [],
                     isActive: true,
@@ -1369,68 +1424,73 @@
             }
 
             checkForNewDay() {
-                const lastAccessDate = localStorage.getItem('lastAccessDate');
                 const today = this.getTodayDate();
+                let anyChanges = false;
                 
-                if (!lastAccessDate || lastAccessDate !== today) {
-                    let streaksBroken = 0;
-                    let habitsCompletedYesterday = 0;
+                this.habits.forEach(habit => {
+                    if (!habit.isActive) return;
                     
-                    // Verificar cada hábito
-                    this.habits.forEach(habit => {
-                        if (!habit.isActive) return;
-                        
+                    // Se é um novo dia (última verificação não é hoje)
+                    if (habit.daily.lastCheckDate !== today) {
+                        // Registrar se o hábito foi concluído no dia anterior
                         const yesterday = this.getYesterdayDate();
-                        const wasCompletedYesterday = habit.completions && habit.completions[yesterday];
-                        const todayDay = new Date().getDay();
-                        
-                        // Verificar se o hábito se aplica a hoje
-                        const appliesToday = habit.daysOfWeek.includes(todayDay);
+                        const wasCompletedYesterday = habit.accumulated.history[yesterday];
+                        const yesterdayDay = new Date(yesterday).getDay();
+                        const appliesToYesterday = habit.daysOfWeek && habit.daysOfWeek.includes(yesterdayDay);
                         
                         if (wasCompletedYesterday) {
-                            habitsCompletedYesterday++;
-                        }
-                        
-                        // Se o hábito não foi concluído ontem E tinha uma streak E se aplicava a ontem
-                        if (!wasCompletedYesterday && habit.streak > 0 && habit.daysOfWeek.includes((todayDay + 6) % 7)) {
-                            // Marcar que perdeu um dia
-                            if (!habit.missedDays) habit.missedDays = [];
-                            habit.missedDays.push(yesterday);
+                            // Aumentar a streak
+                            habit.accumulated.streak += 1;
                             
-                            // Quebrar a streak
-                            habit.streak = 0;
-                            streaksBroken++;
+                            // Atualizar melhor streak
+                            if (habit.accumulated.streak > habit.accumulated.bestStreak) {
+                                habit.accumulated.bestStreak = habit.accumulated.streak;
+                            }
+                        } else if (appliesToYesterday && habit.accumulated.streak > 0) {
+                            // Se não foi concluído ontem e deveria, quebrar a streak
+                            habit.accumulated.streak = 0;
+                            
+                            // Registrar dia perdido
+                            if (!habit.missedDays) habit.missedDays = [];
+                            if (!habit.missedDays.includes(yesterday)) {
+                                habit.missedDays.push(yesterday);
+                            }
                         }
                         
-                        // Limpar missedDays antigos (mais de 30 dias)
-                        if (habit.missedDays) {
-                            habit.missedDays = habit.missedDays.filter(date => {
-                                const daysDiff = this.getDaysDifference(date, today);
-                                return daysDiff <= 30;
-                            });
-                        }
-                    });
-                    
-                    // Salvar nova data de acesso
-                    localStorage.setItem('lastAccessDate', today);
-                    
-                    // Salvar alterações
-                    if (streaksBroken > 0 || habitsCompletedYesterday > 0) {
-                        this.saveHabits();
+                        // Resetar status diário para o novo dia
+                        habit.daily = {
+                            completed: false,
+                            lastCheckDate: today
+                        };
                         
-                        // Mostrar notificação matinal
-                        if (lastAccessDate && lastAccessDate !== today) {
-                            let message = 'Bom dia! ';
-                            if (habitsCompletedYesterday > 0) {
-                                message += `Você completou ${habitsCompletedYesterday} hábito(s) ontem. `;
-                            }
-                            if (streaksBroken > 0) {
-                                message += `Continue hoje para manter suas sequências!`;
-                            } else {
-                                message += `Continue com seus hábitos!`;
-                            }
-                            this.showNotification(message, streaksBroken > 0 ? 'warning' : 'success');
+                        anyChanges = true;
+                    }
+                });
+                
+                // Limpar dias perdidos antigos (mais de 30 dias)
+                const thirtyDaysAgo = new Date();
+                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().split('T')[0];
+                
+                this.habits.forEach(habit => {
+                    if (habit.missedDays) {
+                        const originalLength = habit.missedDays.length;
+                        habit.missedDays = habit.missedDays.filter(date => date >= thirtyDaysAgoStr);
+                        if (originalLength !== habit.missedDays.length) {
+                            anyChanges = true;
                         }
+                    }
+                });
+                
+                // Salvar se houver alterações
+                if (anyChanges) {
+                    this.saveHabits();
+                    
+                    // Mostrar notificação matinal apenas se for realmente um novo dia
+                    const lastAccessDate = localStorage.getItem('lastAccessDate');
+                    if (lastAccessDate !== today) {
+                        this.showNotification('Bom dia! Seus hábitos foram resetados para o novo dia. Continue sua sequência!', 'success');
+                        localStorage.setItem('lastAccessDate', today);
                     }
                 }
             }
@@ -1446,7 +1506,7 @@
                         break;
                     case 'completed':
                         filteredHabits = this.habits.filter(habit => 
-                            habit.completions && habit.completions[today]
+                            habit.daily && habit.daily.completed
                         );
                         break;
                     case 'priority':
@@ -1472,9 +1532,9 @@
                 let habitsHTML = '';
                 filteredHabits.forEach(habit => {
                     const today = this.getTodayDate();
-                    const isCompletedToday = habit.completions && habit.completions[today];
+                    const isCompletedToday = habit.daily && habit.daily.completed;
                     const yesterday = this.getYesterdayDate();
-                    const wasCompletedYesterday = habit.completions && habit.completions[yesterday];
+                    const wasCompletedYesterday = habit.accumulated.history && habit.accumulated.history[yesterday];
                     const hasMissedDays = habit.missedDays && habit.missedDays.length > 0;
                     
                     // Determinar classe CSS baseada no status
@@ -1542,7 +1602,7 @@
                                 ` : ''}
                                 <div class="habit-streak">
                                     <i class="fas fa-fire streak-fire"></i>
-                                    <span>Sequência: ${habit.streak} dias (Melhor: ${habit.bestStreak})</span>
+                                    <span>Sequência: ${habit.accumulated.streak || 0} dias (Melhor: ${habit.accumulated.bestStreak || 0})</span>
                                     ${hasMissedDays ? `<span class="missed-day-indicator">${habit.missedDays.length} dia(s) perdido(s)</span>` : ''}
                                 </div>
                             </div>
@@ -1559,7 +1619,6 @@
                 
                 const habit = this.habits[habitIndex];
                 const today = this.getTodayDate();
-                const yesterday = this.getYesterdayDate();
                 const todayDay = new Date().getDay();
                 
                 // Verificar se o hábito se aplica a hoje
@@ -1568,46 +1627,30 @@
                     return;
                 }
                 
-                // Inicializar objeto de conclusões se não existir
-                if (!habit.completions) {
-                    habit.completions = {};
-                }
+                // Alternar status de conclusão diária
+                habit.daily.completed = !habit.daily.completed;
                 
-                // Verificar se o hábito já foi concluído hoje
-                if (habit.completions[today]) {
-                    // Desmarcar conclusão
-                    delete habit.completions[today];
-                    
-                    // Reduzir streak se foi concluído ontem
-                    if (habit.completions[yesterday]) {
-                        habit.streak = Math.max(0, habit.streak - 1);
-                    } else {
-                        habit.streak = 0;
-                    }
-                    
-                    this.showNotification('Hábito desmarcado como concluído');
-                } else {
-                    // Marcar como concluído hoje
-                    habit.completions[today] = true;
+                // Atualizar histórico acumulado
+                if (habit.daily.completed) {
+                    // Adicionar ao histórico
+                    if (!habit.accumulated.history) habit.accumulated.history = {};
+                    habit.accumulated.history[today] = true;
+                    habit.accumulated.totalCompletions = (habit.accumulated.totalCompletions || 0) + 1;
                     
                     // Remover de missedDays se estava lá
                     if (habit.missedDays) {
                         habit.missedDays = habit.missedDays.filter(date => date !== today);
                     }
                     
-                    // Verificar se foi concluído ontem para aumentar a sequência
-                    if (habit.completions[yesterday]) {
-                        habit.streak += 1;
-                    } else {
-                        habit.streak = 1;
+                    this.showNotification('Hábito marcado como concluído hoje!');
+                } else {
+                    // Remover do histórico
+                    if (habit.accumulated.history && habit.accumulated.history[today]) {
+                        delete habit.accumulated.history[today];
+                        habit.accumulated.totalCompletions = Math.max(0, (habit.accumulated.totalCompletions || 1) - 1);
                     }
                     
-                    // Atualizar melhor sequência
-                    if (habit.streak > habit.bestStreak) {
-                        habit.bestStreak = habit.streak;
-                    }
-                    
-                    this.showNotification('Hábito marcado como concluído!');
+                    this.showNotification('Hábito desmarcado como concluído hoje');
                 }
                 
                 habit.lastUpdated = new Date().toISOString();
@@ -1670,14 +1713,13 @@
             }
 
             calculateStatsData() {
-                const today = this.getTodayDate();
                 const activeHabits = this.habits.filter(habit => habit.isActive).length;
                 const completedToday = this.habits.filter(habit => 
-                    habit.completions && habit.completions[today]
+                    habit.daily && habit.daily.completed
                 ).length;
                 
                 const bestStreak = this.habits.length > 0 
-                    ? Math.max(...this.habits.map(habit => habit.bestStreak))
+                    ? Math.max(...this.habits.map(habit => habit.accumulated.bestStreak || 0))
                     : 0;
                 
                 const consistencyRate = this.calculateConsistencyRate();
@@ -1693,9 +1735,7 @@
             calculateConsistencyRate() {
                 if (this.habits.length === 0) return 0;
                 
-                const today = this.getTodayDate();
                 const last7Days = [];
-                
                 for (let i = 6; i >= 0; i--) {
                     const date = new Date();
                     date.setDate(date.getDate() - i);
@@ -1707,14 +1747,13 @@
                 
                 this.habits.forEach(habit => {
                     if (habit.isActive && habit.frequency === 'daily') {
-                        // Verificar cada dia se o hábito se aplica
                         last7Days.forEach(date => {
                             const dateObj = new Date(date);
                             const dayOfWeek = dateObj.getDay();
                             
                             if (habit.daysOfWeek && habit.daysOfWeek.includes(dayOfWeek)) {
                                 totalPossibleCompletions++;
-                                if (habit.completions && habit.completions[date]) {
+                                if (habit.accumulated.history && habit.accumulated.history[date]) {
                                     actualCompletions++;
                                 }
                             }
@@ -1907,7 +1946,7 @@
                 
                 lastDays.forEach(({date, dayOfWeek}) => {
                     this.habits.forEach(habit => {
-                        if (habit.completions && habit.completions[date]) {
+                        if (habit.accumulated.history && habit.accumulated.history[date]) {
                             // Ajustar índice para começar na segunda-feira
                             const adjustedIndex = (dayOfWeek + 6) % 7;
                             completionCounts[adjustedIndex]++;
@@ -1956,14 +1995,14 @@
                 // Pegar top 5 hábitos por melhor sequência
                 const sortedHabits = [...this.habits]
                     .filter(h => h.isActive)
-                    .sort((a, b) => b.bestStreak - a.bestStreak)
+                    .sort((a, b) => (b.accumulated.bestStreak || 0) - (a.accumulated.bestStreak || 0))
                     .slice(0, 5);
                 
                 this.charts.streak.data.labels = sortedHabits.map(h => 
                     h.name.length > 15 ? h.name.substring(0, 15) + '...' : h.name
                 );
-                this.charts.streak.data.datasets[0].data = sortedHabits.map(h => h.bestStreak);
-                this.charts.streak.data.datasets[1].data = sortedHabits.map(h => h.streak);
+                this.charts.streak.data.datasets[0].data = sortedHabits.map(h => h.accumulated.bestStreak || 0);
+                this.charts.streak.data.datasets[1].data = sortedHabits.map(h => h.accumulated.streak || 0);
                 this.updateChartTheme(this.charts.streak);
                 this.charts.streak.update();
             }
@@ -2010,7 +2049,7 @@
                                 totalPossible++;
                                 
                                 const dateStr = date.toISOString().split('T')[0];
-                                if (habit.completions && habit.completions[dateStr]) {
+                                if (habit.accumulated.history && habit.accumulated.history[dateStr]) {
                                     totalCompleted++;
                                 }
                             }
@@ -2088,13 +2127,13 @@
                 
                 // Hábitos mais consistentes
                 const mostConsistent = [...this.habits]
-                    .filter(h => h.streak >= 3)
-                    .sort((a, b) => b.streak - a.streak)
+                    .filter(h => (h.accumulated.streak || 0) >= 3)
+                    .sort((a, b) => (b.accumulated.streak || 0) - (a.accumulated.streak || 0))
                     .slice(0, 3);
                 
                 if (mostConsistent.length > 0) {
                     mostConsistentEl.innerHTML = mostConsistent.map(habit => 
-                        `<p><strong>${habit.name}</strong>: ${habit.streak} dias consecutivos</p>`
+                        `<p><strong>${habit.name}</strong>: ${habit.accumulated.streak || 0} dias consecutivos</p>`
                     ).join('');
                 } else {
                     mostConsistentEl.innerHTML = '<p>Continue praticando para construir sequências!</p>';
@@ -2104,7 +2143,7 @@
                 const totalHabits = this.habits.length;
                 const activeHabits = this.habits.filter(h => h.isActive).length;
                 const avgStreak = this.habits.length > 0 ? 
-                    Math.round(this.habits.reduce((sum, h) => sum + h.streak, 0) / this.habits.length) : 0;
+                    Math.round(this.habits.reduce((sum, h) => sum + (h.accumulated.streak || 0), 0) / this.habits.length) : 0;
                 
                 const categoryDistribution = {};
                 this.habits.forEach(habit => {
@@ -2136,7 +2175,7 @@
                 }
                 
                 // Verificar hábitos com baixa sequência
-                const lowStreakHabits = this.habits.filter(h => h.streak < 3 && h.isActive);
+                const lowStreakHabits = this.habits.filter(h => (h.accumulated.streak || 0) < 3 && h.isActive);
                 if (lowStreakHabits.length > 0) {
                     suggestions.push(`Foque em "${lowStreakHabits[0].name}" para construir uma sequência sólida.`);
                 }
@@ -2175,7 +2214,7 @@
                             version: '1.0.0',
                             totalHabits: this.habits.length,
                             totalCompletions: this.habits.reduce((total, habit) => {
-                                return total + (habit.completions ? Object.keys(habit.completions).length : 0);
+                                return total + (habit.accumulated.totalCompletions || 0);
                             }, 0)
                         }
                     };
@@ -2285,7 +2324,7 @@
                 const totalHabits = this.habits.length;
                 const activeHabits = this.habits.filter(h => h.isActive).length;
                 const totalCompletions = this.habits.reduce((total, habit) => {
-                    return total + (habit.completions ? Object.keys(habit.completions).length : 0);
+                    return total + (habit.accumulated.totalCompletions || 0);
                 }, 0);
                 
                 const storageUsed = this.estimateStorageUsage();
@@ -2431,6 +2470,28 @@
                 this.domElements.loadingModal.style.display = 'none';
             }
 
+            forceDailyReset() {
+                this.showConfirmation(
+                    'Forçar Reset Diário',
+                    'Tem certeza que deseja forçar o reset diário? Todos os hábitos serão marcados como não concluídos para hoje, mas os progressos acumulados serão mantidos.',
+                    () => {
+                        const today = this.getTodayDate();
+                        
+                        this.habits.forEach(habit => {
+                            habit.daily = {
+                                completed: false,
+                                lastCheckDate: today
+                            };
+                        });
+                        
+                        this.saveHabits();
+                        this.renderHabits();
+                        this.updateStats();
+                        this.showNotification('Reset diário aplicado! Todos os hábitos estão prontos para o novo dia.', 'success');
+                    }
+                );
+            }
+
             createExampleHabits() {
                 const today = this.getTodayDate();
                 const yesterday = this.getYesterdayDate();
@@ -2449,12 +2510,19 @@
                         time: '08:00',
                         daysOfWeek: [1,2,3,4,5,6,0], // Todos os dias
                         createdAt: new Date().toISOString(),
-                        streak: 5,
-                        bestStreak: 7,
-                        completions: {
-                            [today]: true,
-                            [yesterday]: true,
-                            [twoDaysAgoStr]: true
+                        daily: {
+                            completed: true,
+                            lastCheckDate: today
+                        },
+                        accumulated: {
+                            streak: 5,
+                            bestStreak: 7,
+                            totalCompletions: 30,
+                            history: {
+                                [today]: true,
+                                [yesterday]: true,
+                                [twoDaysAgoStr]: true
+                            }
                         },
                         missedDays: [],
                         isActive: true,
@@ -2470,12 +2538,19 @@
                         time: '21:00',
                         daysOfWeek: [1,2,3,4,5], // Dias úteis
                         createdAt: new Date().toISOString(),
-                        streak: 10,
-                        bestStreak: 15,
-                        completions: {
-                            [today]: true,
-                            [yesterday]: true,
-                            [twoDaysAgoStr]: true
+                        daily: {
+                            completed: true,
+                            lastCheckDate: today
+                        },
+                        accumulated: {
+                            streak: 10,
+                            bestStreak: 15,
+                            totalCompletions: 45,
+                            history: {
+                                [today]: true,
+                                [yesterday]: true,
+                                [twoDaysAgoStr]: true
+                            }
                         },
                         missedDays: [],
                         isActive: true,
@@ -2491,11 +2566,18 @@
                         time: '18:00',
                         daysOfWeek: [1,2,3,4,5,6], // Segunda a Sábado
                         createdAt: new Date().toISOString(),
-                        streak: 3,
-                        bestStreak: 10,
-                        completions: {
-                            [today]: true,
-                            [yesterday]: false
+                        daily: {
+                            completed: false,
+                            lastCheckDate: today
+                        },
+                        accumulated: {
+                            streak: 3,
+                            bestStreak: 10,
+                            totalCompletions: 25,
+                            history: {
+                                [yesterday]: true,
+                                [twoDaysAgoStr]: true
+                            }
                         },
                         missedDays: [yesterday],
                         isActive: true,
@@ -2511,11 +2593,18 @@
                         time: '20:00',
                         daysOfWeek: [1,2,3,4,5], // Dias úteis
                         createdAt: new Date().toISOString(),
-                        streak: 8,
-                        bestStreak: 8,
-                        completions: {
-                            [today]: true,
-                            [yesterday]: true
+                        daily: {
+                            completed: true,
+                            lastCheckDate: today
+                        },
+                        accumulated: {
+                            streak: 8,
+                            bestStreak: 8,
+                            totalCompletions: 32,
+                            history: {
+                                [today]: true,
+                                [yesterday]: true
+                            }
                         },
                         missedDays: [],
                         isActive: true,
@@ -2578,6 +2667,10 @@
         
         window.closeConfirmationModal = function() {
             app.closeConfirmationModal();
+        };
+
+        window.forceDailyReset = function() {
+            app.forceDailyReset();
         };
 
         // Inicializar quando o DOM estiver carregado
